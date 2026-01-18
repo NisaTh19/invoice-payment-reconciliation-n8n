@@ -1,0 +1,6 @@
+payment_id,client_id,payment_date,amount,currency,reference
+PAY-001,C001,2024-02-03,1200.00,CHF,"Payment INV-2024-001"
+PAY-002,C001,2024-02-25,400.00,CHF,"Partial payment inv 2024-002"
+PAY-003,C002,2024-02-28,980.50,EUR,"Invoice INV-2024-003 Thomas Consulting"
+PAY-004,C005,2024-03-01,500.00,CHF,"Event services February"
+PAY-005,C001,2024-02-26,400.00,CHF,"INV-2024-002 second transfer"
