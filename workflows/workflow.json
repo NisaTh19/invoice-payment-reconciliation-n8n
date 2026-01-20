@@ -1,0 +1,781 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1168,
+        -48
+      ],
+      "id": "0a1a4551-12f1-4d15-b2d9-4ce3b9e573a9",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+        },
+        "options": {
+          "binaryPropertyName": "payments_data",
+          "googleFileConversion": {
+            "conversion": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -944,
+        48
+      ],
+      "id": "f784430c-d77b-4616-bc01-50064ceff50b",
+      "name": "Download payments.csv",
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+        },
+        "options": {
+          "binaryPropertyName": "invoices_data",
+          "googleFileConversion": {
+            "conversion": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -944,
+        -144
+      ],
+      "id": "10012168-4f13-460e-8a9f-4559d379d1db",
+      "name": "Download invoices.csv",
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "invoices_data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -720,
+        -144
+      ],
+      "id": "3d2dc277-cf94-4ed3-8e7b-180670ace5bc",
+      "name": "Extract from invoices_data"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "payments_data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -720,
+        48
+      ],
+      "id": "7a3e12fc-2c8b-4156-8a7f-b917ad68b5ce",
+      "name": "Extract from payments_data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.invoice_date_iso = new Date(item.json.invoice_date).toISOString();\n  item.json.due_date_iso = new Date(item.json.due_date).toISOString();\n  item.json.total_amount_fl = parseFloat(item.json.total_amount)\n  item.json.currency_upp = item.json.currency.toUpperCase()\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -496,
+        -144
+      ],
+      "id": "66310f50-6eb1-4f5e-be11-7d299b5ffe4b",
+      "name": "Normalize invoices_data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.payment_date_iso = new Date(item.json.payment_date).toISOString();\n  item.json.amount_fl = parseFloat(item.json.amount)\n  item.json.currency_upp = item.json.currency.toUpperCase()\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -496,
+        48
+      ],
+      "id": "ba22b985-0a62-4eb5-85a7-6b7c58310181",
+      "name": "Normalize payments_data"
+    },
+    {
+      "parameters": {
+        "jsCode": "const invoices = $(\"Normalize invoices_data\").all().map(i => i.json);\nconst payments = $(\"Normalize payments_data\").all().map(i => i.json);\n\nconst TOL = 0.5;\nconst WINDOW_DAYS = 120;\nconst WINDOW_MS = WINDOW_DAYS * 24 * 60 * 60 * 1000;\nconst now = Date.now();\n\nlet matched = [];\nlet exceptions = [];\nlet usedPaymentIds = new Set();\n\nfor (const inv of invoices) {\n  let foundPayment = null;\n\n  for (const pay of payments) {\n    if (usedPaymentIds.has(pay.payment_id)) continue;\n\n    const sameClient = pay.client_id === inv.client_id;\n    const sameCurrency = pay.currency_upp === inv.currency_upp;\n    const amountClose = Math.abs(pay.amount_fl - inv.total_amount_fl) <= TOL;\n    const inv_date = new Date(inv.invoice_date_iso)\n    const pay_date = new Date(pay.payment_date_iso)\n    const withinWindow = inv_date.getTime() != null && \n      pay_date.getTime() != null &&\n      Math.abs(pay_date.getTime() - inv_date.getTime()) <= WINDOW_MS;\n\n    const invRef = String(inv.invoice_number ?? \"\")\n      .toLowerCase()\n      .replace(/[^a-z0-9]+/g, \"\");\n    \n    const payRef = String(\n      pay.reference ?? pay.payment_reference ?? pay.description ?? \"\"\n    )\n      .toLowerCase()\n      .replace(/[^a-z0-9]+/g, \"\");\n    \n    const referenceMatch = invRef !== \"\" && payRef.includes(invRef);\n\n    if (sameClient && sameCurrency && (amountClose || referenceMatch) && withinWindow) {\n      foundPayment = pay;\n      break;\n    }\n  }\n\n  if (foundPayment) {\n    usedPaymentIds.add(foundPayment.payment_id);\n    matched.push({\n      invoice_number: inv.invoice_number,\n      client_id: inv.client_id,\n      payment_id: foundPayment.payment_id,\n      amount: foundPayment.amount_fl,\n      total: inv.total_amount_fl,\n    });\n  } else {\n    const inv_due_date = new Date(inv.due_date_iso)\n    const isOverdue = inv_due_date.getTime() != null && inv_due_date.getTime() < now;\n    exceptions.push({\n      type: isOverdue ? \"OVERDUE_INVOICE\" : \"UNPAID_NOT_DUE\",\n      invoice_number: inv.invoice_number,\n      client_id: inv.client_id,\n      due_date: inv.due_date,\n      amount: inv.total_amount_fl\n    });\n  }\n}\n\n// Orphan payments\nfor (const pay of payments) {\n  if (!usedPaymentIds.has(pay.payment_id)) {\n    exceptions.push({\n      type: \"ORPHAN_PAYMENT\",\n      payment_id: pay.payment_id,\n      client_id: pay.client_id,\n      amount: pay.amount_fl,\n    });\n  }\n}\n\nreturn [\n  {\n    json: {\n      matched_count: matched.length,\n      exceptions_count: exceptions.length,\n      sample_matched: matched[0] ?? null,\n      sample_exception: exceptions[0] ?? null,\n      matched,\n      exceptions,\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        -48
+      ],
+      "id": "39a44ab6-36f6-4147-8b71-99530e9d69cd",
+      "name": "Reconcile Invoices vs Payments"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {},
+        "text": "={{ $json.output[0].content[0].text }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        736,
+        -240
+      ],
+      "id": "8a7345d7-a9f9-4e22-baa9-b65131541035",
+      "name": "Send to accounting team",
+      "webhookId": "f0f5ea15-042c-4d94-805a-fe49386e5625",
+      "credentials": {}
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-nano",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-NANO"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=You are a data analyst acting as an automated machine, meaning people must not think that a person has written this. So, do not act as though you are responding to someone. You are just outputting the result as if you were an automated output.\n\nSummarize the table at the end in a short report.\n\nIndications : \n- group exceptions by likely cause\n- suggest who should look (AP vs AR)\n- generate follow-up questions \n\nOutput format indications : For bold text, you surround the text with only one asterix on each side and not 2.\n\nThe table : {{ JSON.stringify($json.exceptions) }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        384,
+        -240
+      ],
+      "id": "c9b9df7b-bfdd-48dc-84cf-78f036c3b19e",
+      "name": "Create summary",
+      "credentials": {
+        "openAiApi": {
+          "id": "RwJe8AFDVqIACZEc",
+          "name": "n8n free OpenAI API credits"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "matched",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        448,
+        -48
+      ],
+      "id": "c2902450-196a-4b41-90a9-263aad864818",
+      "name": "Split Out \"matched\""
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "exceptions",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        448,
+        144
+      ],
+      "id": "d25a9da0-0e8e-4a93-9042-02d9075174b2",
+      "name": "Split Out \"exceptions\""
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {},
+        "sheetName": {},
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "spreadsheetId",
+              "displayName": "spreadsheetId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "properties",
+              "displayName": "properties",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sheets",
+              "displayName": "sheets",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "spreadsheetUrl",
+              "displayName": "spreadsheetUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "type",
+              "displayName": "type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "invoice_number",
+              "displayName": "invoice_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "client_id",
+              "displayName": "client_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "due_date",
+              "displayName": "due_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "amount",
+              "displayName": "amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payment_id",
+              "displayName": "payment_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "total",
+              "displayName": "total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        736,
+        -48
+      ],
+      "id": "12f55427-2979-43b0-9573-d420167c8344",
+      "name": "Append row in sheet \"matched\"",
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {},
+        "sheetName": {},
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "type",
+              "displayName": "type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "invoice_number",
+              "displayName": "invoice_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "client_id",
+              "displayName": "client_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "due_date",
+              "displayName": "due_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "amount",
+              "displayName": "amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payment_id",
+              "displayName": "payment_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        736,
+        144
+      ],
+      "id": "6b0d63ee-4e5c-4ff5-99d1-3b43f8f775d2",
+      "name": "Append row in sheet \"exceptions\"",
+      "credentials": {}},
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "output": "empty"
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -272,
+        -48
+      ],
+      "id": "8337b7ff-43c1-4370-9751-037b4e2088b7",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cd10b8ea-02ea-4d39-b562-b3838eab65b5",
+              "leftValue": "={{ $json.exceptions_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        128,
+        -192
+      ],
+      "id": "1b71d85d-da2b-4641-95ed-8ba9f4ed3ad2",
+      "name": "If exceptions exist"
+    }
+  ],
+  "pinData": {
+    "Extract from invoices_data": [
+      {
+        "json": {
+          "invoice_number": "INV-2024-001",
+          "client_id": "C001",
+          "invoice_date": "2024-01-05",
+          "due_date": "2024-02-05",
+          "total_amount": "1200.00",
+          "currency": "CHF"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      },
+      {
+        "json": {
+          "invoice_number": "INV-2024-002",
+          "client_id": "C001",
+          "invoice_date": "2024-01-20",
+          "due_date": "2024-02-20",
+          "total_amount": "450.00",
+          "currency": "CHF"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      },
+      {
+        "json": {
+          "invoice_number": "INV-2024-003",
+          "client_id": "C002",
+          "invoice_date": "2024-02-01",
+          "due_date": "2024-03-01",
+          "total_amount": "980.50",
+          "currency": "EUR"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      },
+      {
+        "json": {
+          "invoice_number": "INV-2024-004",
+          "client_id": "C003",
+          "invoice_date": "2024-02-10",
+          "due_date": "2024-03-10",
+          "total_amount": "3000.00",
+          "currency": "CHF"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      },
+      {
+        "json": {
+          "invoice_number": "INV-2024-005",
+          "client_id": "C004",
+          "invoice_date": "2024-02-15",
+          "due_date": "2024-03-15",
+          "total_amount": "750.00",
+          "currency": "CHF"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ],
+    "Extract from payments_data": [
+      {
+        "json": {
+          "payment_id": "PAY-001",
+          "client_id": "C001",
+          "payment_date": "2024-02-03",
+          "amount": "1200.00",
+          "currency": "CHF",
+          "reference": "Payment INV-2024-001"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      },
+      {
+        "json": {
+          "payment_id": "PAY-002",
+          "client_id": "C001",
+          "payment_date": "2024-02-25",
+          "amount": "400.00",
+          "currency": "CHF",
+          "reference": "Partial payment inv 2024-002"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      },
+      {
+        "json": {
+          "payment_id": "PAY-003",
+          "client_id": "C002",
+          "payment_date": "2024-02-28",
+          "amount": "980.50",
+          "currency": "EUR",
+          "reference": "Invoice INV-2024-003 Thomas Consulting"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      },
+      {
+        "json": {
+          "payment_id": "PAY-004",
+          "client_id": "C005",
+          "payment_date": "2024-03-01",
+          "amount": "500.00",
+          "currency": "CHF",
+          "reference": "Event services February"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      },
+      {
+        "json": {
+          "payment_id": "PAY-005",
+          "client_id": "C001",
+          "payment_date": "2024-02-26",
+          "amount": "400.00",
+          "currency": "CHF",
+          "reference": "INV-2024-002 second transfer"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ]
+  },
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Download payments.csv",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Download invoices.csv",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download payments.csv": {
+      "main": [
+        [
+          {
+            "node": "Extract from payments_data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download invoices.csv": {
+      "main": [
+        [
+          {
+            "node": "Extract from invoices_data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from invoices_data": {
+      "main": [
+        [
+          {
+            "node": "Normalize invoices_data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from payments_data": {
+      "main": [
+        [
+          {
+            "node": "Normalize payments_data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize payments_data": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Normalize invoices_data": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconcile Invoices vs Payments": {
+      "main": [
+        [
+          {
+            "node": "Split Out \"matched\"",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Out \"exceptions\"",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If exceptions exist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create summary": {
+      "main": [
+        [
+          {
+            "node": "Send to accounting team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out \"matched\"": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet \"matched\"",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out \"exceptions\"": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet \"exceptions\"",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Reconcile Invoices vs Payments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If exceptions exist": {
+      "main": [
+        [
+          {
+            "node": "Create summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "c4f90dd1-abc8-488c-ab7c-589afc910c96",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "9a4a63b1cf32d7d6e3446862dab1a9b6cfa42145d37696aa8bd31c4a878675d2"
+  },
+  "id": "9UUQCNz8voU-FFMs0YNSC",
+  "tags": []
+}
